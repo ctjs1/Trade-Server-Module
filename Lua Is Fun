@@ -1,0 +1,507 @@
+local TradeServerModule = {}
+
+--// Services
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local Players = game:GetService("Players")
+
+--// Variables
+local DataFolder = ServerStorage.Data
+local GameClient = ReplicatedStorage:WaitForChild("GameClient")
+local EventsFolder = GameClient:WaitForChild("Events")
+local UpdateTradePlayers = EventsFolder.RemoteEvent.UpdateTradePlayers
+local GetCanPlayerTradeEvent = EventsFolder.RemoteFunction.GetCanPlayerTrade
+local ChangePlayerCanTradeEvent = EventsFolder.RemoteFunction.ChangePlayerCanTrade
+local PromptTradeAcceptEvent = EventsFolder.RemoteEvent.PromptTradeAccept
+local DeclineTradeEvent = EventsFolder.RemoteEvent.DeclineTrade
+local AddPetToTradeEvent = GameClient.Events.RemoteFunction.AddPetToTrade
+local AddPetInTradeEvent_Display = EventsFolder.RemoteEvent.AddPetInTrade
+local AcceptDeclineTradeEvent = EventsFolder.RemoteEvent.AcceptDeclineTrade
+local TradeID = 0
+
+--// Modules
+local DataController = require(DataFolder.DataController)
+local PetHandler = require(script.Parent.PetHandler)
+
+function TradeServerModule:CanPlayerTrade(plr, PlayerName, CheckIsInTrade)
+	if PlayerName ~= nil then
+		local Player = Players:FindFirstChild(tostring(PlayerName))
+		if Player ~= nil then
+			local Data = DataController:GetAllData(Player)
+			if Data ~= nil then
+				if Data.TradingControl == nil then
+					Data.TradingControl = {
+						HasTradeOn = true;
+						CurrentlyInTrade = false;
+					}
+					DataController:SavePlayerData(plr)
+					return true
+				else
+					local HasTradeOn = Data.TradingControl.HasTradeOn
+					if HasTradeOn == true then
+						if CheckIsInTrade == true then
+							local CurrentlyInTrade = Data.TradingControl.CurrentlyInTrade
+							if CurrentlyInTrade == false then
+								return true
+							end
+						elseif CheckIsInTrade == "CheckTrade" then
+							local CurrentlyInTrade = Data.TradingControl.CurrentlyInTrade
+							if CurrentlyInTrade == true then
+								return "CurrentlyTrading"
+							else
+								return true
+							end
+						else
+							return true
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+function TradeServerModule:PlayerJoin(Player)
+	delay(2, function()
+		DataController:SetStatForPlayer(Player, "HasTradeOn", true)
+		DataController:SetStatForPlayer(Player, "CurrentlyInTrade", false)
+	end)
+end
+
+function TradeServerModule:SwitchPlayerCanTradeBool(Player, Which)
+	if Player ~= nil and Which ~= nil then
+		local Data = DataController:GetAllData(Player)
+		if Data ~= nil then
+			if Data.TradingControl ~= nil then
+				if Which == true or Which == false then
+					DataController:SetStatForPlayer(Player, "HasTradeOn", Which) wait()
+
+					spawn(function()
+						UpdateTradePlayers:FireAllClients()
+					end)
+
+					return true
+				end
+			end
+		end
+	end
+end
+
+function TradeServerModule:PromptTradeAccept(Player1, Player2Name)
+	if Player1 ~= nil and Player2Name ~= nil then
+		local Player2 = Players:FindFirstChild(tostring(Player2Name))
+		if Player2 ~= nil then
+			if self:CanPlayerTrade(Player1, Player1.Name, true) == true then --- Player 1 can trade
+				if self:CanPlayerTrade(Player2, Player2.Name, true) == true then --- Player 2 can trade
+					
+					PromptTradeAcceptEvent:FireClient(Player1, "UpdateOtherPlayer", {Player2.Name})
+
+					PromptTradeAcceptEvent:FireClient(Player2, "PromptTrade", {Player1.Name})
+				end
+			end
+		end
+	end
+end
+
+local function MakeTradeData(Player1, Player2)
+	local clone = ServerStorage.TradeData.Template:Clone()
+	
+	TradeID = tonumber(TradeID) + 1
+	clone.Name = "Trade_".. tostring(TradeID)
+	
+	clone.Player1.Value = Player1.Name
+	clone.Player2.Value = Player2.Name
+	
+	clone.Parent = ServerStorage.TradeData
+end
+
+local function FindTradeData(PlayerName)
+	for _, v in pairs(ServerStorage.TradeData:GetChildren()) do
+		if v.Name == "Template" then else 
+			local plr1 = v.Player1.Value
+			local plr2 = v.Player2.Value
+			if plr1 == PlayerName then
+				return v, v.Pets.Player1, v.Confirmed.Player1
+			elseif plr2 == PlayerName then
+				return v, v.Pets.Player2, v.Confirmed.Player2
+			end
+		end
+	end
+end
+
+local function FindTradeData_2Players(Player1Name, Player2Name)
+	for _, v in pairs(ServerStorage.TradeData:GetChildren()) do
+		if v.Name == "Template" then else 
+			local plr1 = v.Player1.Value
+			local plr2 = v.Player2.Value
+			if plr1 == Player1Name then
+				if plr2 == Player2Name then
+					return v
+				end
+			elseif plr2 == Player1Name then
+				if plr1 == Player2Name then
+					return v
+				end
+			end
+		end
+	end
+end
+
+local function MakePetDataForTradeData(Parent, PetName, PetID)
+	local pet = Instance.new("Folder")
+	pet.Name = PetID
+	
+	local id = Instance.new("StringValue")
+	id.Name = "PetID"
+	id.Value = PetID
+	id.Parent = pet
+	
+	local name = Instance.new("StringValue")
+	name.Name = "PetName"
+	name.Value = PetName
+	name.Parent = pet
+	
+	pet.Parent = Parent
+	return pet
+end
+
+local function FindPetDataInTradeData(Parent, PetName, PetID)
+	for _, v in pairs(Parent:GetChildren()) do
+		if v:FindFirstChild("PetName") ~= nil and v:FindFirstChild("PetID") ~= nil then
+			local name, id = v.PetName.Value, v.PetID.Value
+			if name == PetName then
+				if id == PetID then
+					return true, v
+				end
+			end
+		end
+	end
+	return false, nil
+end
+
+function TradeServerModule:AddPetToTradeData(plr, PlayerName, Type, PetData)
+	if PlayerName ~= nil and Type ~= nil and PetData ~= nil and type(PetData) == "table" then
+		local Player = Players:FindFirstChild(tostring(PlayerName))
+		if Player ~= nil then
+			local TradeData, PetsHolder, ConfirmValue = FindTradeData(tostring(PlayerName))
+			if TradeData ~= nil and PetsHolder ~= nil and ConfirmValue ~= nil then
+				if ConfirmValue.Value == true then else
+					local PetName, PetID = PetData.PetName, PetData.PetID
+					if Type == "Add" then
+						if (#PetsHolder:GetChildren()) >= 8 then
+							return
+						end
+						local FoundPet, Pet = FindPetDataInTradeData(PetsHolder, PetName, PetID)
+						if FoundPet == false and Pet == nil then
+							local PetPhysicalData = MakePetDataForTradeData(PetsHolder, PetName, PetID)
+							
+							local Player1Name = TradeData.Player1.Value
+							local Player1 = Players:FindFirstChild(tostring(Player1Name))
+							if Player1 ~= nil then
+								AddPetInTradeEvent_Display:FireClient(Player1, tostring(PlayerName), "Add", PetName, PetID)
+							end
+							
+							local Player2Name = TradeData.Player2.Value
+							local Player2 = Players:FindFirstChild(tostring(Player2Name))
+							if Player2 ~= nil then
+								AddPetInTradeEvent_Display:FireClient(Player2, tostring(PlayerName), "Add", PetName, PetID)
+							end
+							
+							if PlayerName == Player1Name then
+								if TradeData.Confirmed.Player2.Value == true then
+									local Player2 = Players:FindFirstChild(tostring(Player2Name))
+									if Player2 ~= nil then
+										TradeData.Confirmed.Player2.Value = false
+										AcceptDeclineTradeEvent:FireClient(Player2, tostring(Player2Name), "Unready")
+									end
+									
+									local Player1 = Players:FindFirstChild(tostring(Player1Name))
+									if Player1 ~= nil then
+										AcceptDeclineTradeEvent:FireClient(Player1, tostring(Player2Name), "Unready")
+									end
+								end
+							else
+								if TradeData.Confirmed.Player1.Value == true then
+									local Player1 = Players:FindFirstChild(tostring(Player1Name))
+									if Player1 ~= nil then
+										TradeData.Confirmed.Player1.Value = false
+										AcceptDeclineTradeEvent:FireClient(Player1, tostring(Player1Name), "Unready")
+									end
+									
+									local Player2 = Players:FindFirstChild(tostring(Player2Name))
+									if Player2 ~= nil then
+										AcceptDeclineTradeEvent:FireClient(Player2, tostring(Player1Name), "Unready")
+									end
+								end
+							end
+						end
+					elseif Type == "Delete" then
+						local FoundPet, Pet = FindPetDataInTradeData(PetsHolder, PetName, PetID)
+						if FoundPet == true and Pet ~= nil then
+							Pet:Destroy()
+							
+							local Player1Name = TradeData.Player1.Value
+							local Player1 = Players:FindFirstChild(tostring(Player1Name))
+							if Player1 ~= nil then
+								AddPetInTradeEvent_Display:FireClient(Player1, tostring(PlayerName), "Delete", PetName, PetID)
+							end
+							
+							local Player2Name = TradeData.Player2.Value
+							local Player2 = Players:FindFirstChild(tostring(Player2Name))
+							if Player2 ~= nil then
+								AddPetInTradeEvent_Display:FireClient(Player2, tostring(PlayerName), "Delete", PetName, PetID)
+							end
+							
+							if PlayerName == Player1Name then
+								if TradeData.Confirmed.Player2.Value == true then
+									local Player2 = Players:FindFirstChild(tostring(Player2Name))
+									if Player2 ~= nil then
+										TradeData.Confirmed.Player2.Value = false
+										AcceptDeclineTradeEvent:FireClient(Player2, tostring(Player2Name), "Unready")
+									end
+									
+									local Player1 = Players:FindFirstChild(tostring(Player1Name))
+									if Player1 ~= nil then
+										AcceptDeclineTradeEvent:FireClient(Player1, tostring(Player2Name), "Unready")
+									end
+								end
+							else
+								if TradeData.Confirmed.Player1.Value == true then
+									local Player1 = Players:FindFirstChild(tostring(Player1Name))
+									if Player1 ~= nil then
+										TradeData.Confirmed.Player1.Value = false
+										AcceptDeclineTradeEvent:FireClient(Player1, tostring(Player1Name), "Unready")
+									end
+									
+									local Player2 = Players:FindFirstChild(tostring(Player2Name))
+									if Player2 ~= nil then
+										AcceptDeclineTradeEvent:FireClient(Player2, tostring(Player1Name), "Unready")
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+--// Decline Trade
+function TradeServerModule:DeclineTrade(PlayerName)
+	local TradeData, PetsHolder, ConfirmValue = FindTradeData(tostring(PlayerName))
+	if TradeData ~= nil and PetsHolder ~= nil and ConfirmValue ~= nil then
+		local Player1Confirm = TradeData.Confirmed.Player1
+		local Player2Confirm = TradeData.Confirmed.Player2
+		if Player1Confirm.Value == true and Player2Confirm.Value == true then else	
+			local Player1Name = TradeData.Player1.Value
+			local Player2Name = TradeData.Player2.Value
+			
+			TradeData:Destroy()
+			
+			local Player1 = Players:FindFirstChild(tostring(Player1Name))
+			if Player1 ~= nil then
+				DataController:SetStatForPlayer(Player1, "CurrentlyInTrade", false)
+				AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "TradeDeclined")
+			end
+			
+			local Player2 = Players:FindFirstChild(tostring(Player2Name))
+			if Player2 ~= nil then
+				DataController:SetStatForPlayer(Player2, "CurrentlyInTrade", false)
+				AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "TradeDeclined")
+			end
+			
+			spawn(function()
+				UpdateTradePlayers:FireAllClients()
+			end)
+		end
+	end
+end
+
+--// Finish Trade
+function TradeServerModule:FinishTrade(Player1Name, Player2Name)
+	local Player1 = Players:FindFirstChild(tostring(Player1Name))
+	local Player2 = Players:FindFirstChild(tostring(Player2Name))
+	if Player1 ~= nil and Player2 ~= nil then
+		local TradeData = FindTradeData_2Players(tostring(Player1Name), tostring(Player2Name))
+		if TradeData ~= nil then
+			
+			local completed1, plr1max = 0, #TradeData.Pets.Player1:GetChildren()
+			for _, v in pairs(TradeData.Pets.Player1:GetChildren()) do
+				local traded = PetHandler:TradePet(TradeData.Player1.Value, TradeData.Player2.Value, v.PetName.Value, v.PetID.Value)
+				if traded == true then
+					completed1 += 1
+				end
+			end
+			
+			local completed2, plr2max = 0, #TradeData.Pets.Player2:GetChildren()
+			for _, v in pairs(TradeData.Pets.Player2:GetChildren()) do
+				local traded = PetHandler:TradePet(TradeData.Player2.Value, TradeData.Player1.Value, v.PetName.Value, v.PetID.Value)
+				if traded == true then
+					completed2 += 1
+				end
+			end
+			
+			if completed1 >= plr1max  then
+				if completed2 >= plr2max then
+					
+					TradeData:Destroy()
+					
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+function TradeServerModule:AcceptDeclineTrade(plr, PlayerName, Type)
+	if PlayerName ~= nil and Type ~= nil then
+		local Player = Players:FindFirstChild(tostring(PlayerName))
+		if Player ~= nil then
+			if Type == "DeclineTrade" then
+				self:DeclineTrade(tostring(PlayerName))
+				return
+			end
+			
+			local TradeData, PetsHolder, ConfirmValue = FindTradeData(tostring(PlayerName))
+			if TradeData ~= nil and PetsHolder ~= nil and ConfirmValue ~= nil then
+				if Type == "Accept" then
+					if ConfirmValue.Value == false then
+						ConfirmValue.Value = true
+						
+						local Player1Name = TradeData.Player1.Value
+						local Player2Name = TradeData.Player2.Value
+						
+						local Confrim1 = TradeData.Confirmed.Player1.Value
+						local Confrim2 = TradeData.Confirmed.Player2.Value
+						
+						if Confrim1 == true and Confrim2 == true and TradeData.Processing.Value == false then
+							TradeData.Processing.Value = true
+							
+							local Player1 = Players:FindFirstChild(tostring(Player1Name))
+							if Player1 ~= nil then
+								AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "Processing")
+							end
+							
+							local Player2 = Players:FindFirstChild(tostring(Player2Name))
+							if Player2 ~= nil then
+								AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "Processing")
+							end
+							
+							local TimeWait = Random.new():NextInteger(4, 8)
+							delay((tonumber(TimeWait) or 5), function()
+								if Player1 ~= nil and Player2 ~= nil then
+									local TradeCompleted = self:FinishTrade(Player1Name, Player2Name)
+									if TradeCompleted == true then
+										if Player1 ~= nil then
+											DataController:SetStatForPlayer(Player1, "CurrentlyInTrade", false)
+											AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "TradeComplete")
+										end
+										if Player2 ~= nil then
+											DataController:SetStatForPlayer(Player2, "CurrentlyInTrade", false)
+											AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "TradeComplete")
+										end
+									else
+										if Player1 ~= nil then
+											DataController:SetStatForPlayer(Player1, "CurrentlyInTrade", false)
+											AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "TradeFailed")
+										end
+										if Player2 ~= nil then
+											DataController:SetStatForPlayer(Player2, "CurrentlyInTrade", false)
+											AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "TradeFailed")
+										end
+									end
+									
+									spawn(function()
+										UpdateTradePlayers:FireAllClients()
+									end)
+								end
+							end)
+						else
+							local Player1 = Players:FindFirstChild(tostring(Player1Name))
+							if Player1 ~= nil then
+								AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "ShowReady", tostring(Player2Name))
+							end
+							
+							local Player2 = Players:FindFirstChild(tostring(Player2Name))
+							if Player2 ~= nil then
+								AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "ShowReady", tostring(Player1Name))
+							end
+						end
+					end
+				elseif Type == "Unready" then
+					if ConfirmValue.Value == true then
+						ConfirmValue.Value = false
+						
+						local Player1Name = TradeData.Player1.Value
+						local Player2Name = TradeData.Player2.Value
+						
+						local Player1 = Players:FindFirstChild(tostring(Player1Name))
+						if Player1 ~= nil then
+							AcceptDeclineTradeEvent:FireClient(Player1, tostring(PlayerName), "Unready")
+						end
+					
+						local Player2 = Players:FindFirstChild(tostring(Player2Name))
+						if Player2 ~= nil then
+							AcceptDeclineTradeEvent:FireClient(Player2, tostring(PlayerName), "Unready")
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+function TradeServerModule:StartEndTrade(Player2, Player1Name, Type)
+	if Type == "Decline" then
+		local Player1 = Players:FindFirstChild(tostring(Player1Name))
+		if Player1 ~= nil and Player2 ~= nil then
+			spawn(function()
+				UpdateTradePlayers:FireClient(Player1, true)
+			end)
+			spawn(function()
+				UpdateTradePlayers:FireClient(Player2, true)
+			end)
+		end
+	elseif Type == "Accept" then
+		local Player1 = Players:FindFirstChild(tostring(Player1Name))
+		if Player1 ~= nil and Player2 ~= nil then
+			MakeTradeData(Player1, Player2)
+
+			DataController:SetStatForPlayer(Player1, "CurrentlyInTrade", true)
+			DataController:SetStatForPlayer(Player2, "CurrentlyInTrade", true)
+
+			PromptTradeAcceptEvent:FireClient(Player1, "OpenTradeMenu", {Player1.Name, Player2.Name})
+			PromptTradeAcceptEvent:FireClient(Player2, "OpenTradeMenu", {Player1.Name, Player2.Name})
+			
+			spawn(function()
+				UpdateTradePlayers:FireAllClients()
+			end)
+		end
+	end
+end
+
+function TradeServerModule:Int()
+	GetCanPlayerTradeEvent.OnServerInvoke = function(...)
+		return self:CanPlayerTrade(...)
+	end
+	ChangePlayerCanTradeEvent.OnServerInvoke = function(...)
+		return self:SwitchPlayerCanTradeBool(...)
+	end
+	PromptTradeAcceptEvent.OnServerEvent:Connect(function(...)
+		self:PromptTradeAccept(...)
+	end)
+	DeclineTradeEvent.OnServerEvent:Connect(function(...)
+		self:StartEndTrade(...)
+	end)
+	AddPetToTradeEvent.OnServerInvoke = function(...)
+		return self:AddPetToTradeData(...)
+	end
+	AcceptDeclineTradeEvent.OnServerEvent:Connect(function(...)
+		self:AcceptDeclineTrade(...)
+	end)
+end
+
+return TradeServerModule
